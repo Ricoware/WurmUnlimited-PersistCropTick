@@ -3,7 +3,6 @@ package org.ricoware.wurmunlimited.mods.persistcroptick;
 import java.util.Properties;
 
 import org.gotti.wurmunlimited.modloader.ReflectionUtil;
-import org.gotti.wurmunlimited.modloader.classhooks.HookException;
 import org.gotti.wurmunlimited.modloader.classhooks.HookManager;
 import org.gotti.wurmunlimited.modloader.classhooks.InvocationHandlerFactory;
 import org.gotti.wurmunlimited.modloader.interfaces.Configurable;
@@ -21,8 +20,6 @@ import com.wurmonline.server.zones.CropTilePoller;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 
-import javassist.ClassPool;
-import javassist.CtClass;
 import javassist.CtPrimitiveType;
 import javassist.bytecode.Descriptor;
 
@@ -49,6 +46,21 @@ public class persistcroptick implements WurmServerMod, Configurable, Initable, P
 	@Override
 	public boolean onPlayerMessage(Communicator communicator, String message) {
 		if(message != null) {
+			if(communicator.player.getPower() > 3 && message.equals("/setCropTickNow")) {
+				long fieldGrowthTime = Servers.localServer.getFieldGrowthTime();		
+				long currentTime = System.currentTimeMillis();
+				long newTickTime = currentTime - fieldGrowthTime + 1000;
+
+				try {
+					ReflectionUtil.setPrivateField(null, ReflectionUtil.getField(CropTilePoller.class, "lastPolledTiles"), newTickTime);
+				} 
+				catch (Exception e) {
+					e.printStackTrace();
+				}
+				communicator.sendNormalServerMessage("Crop tick reset.");
+				return true;
+			}
+			
 			if(usePlayerCommand) {
 				if (message.startsWith("/chirp") || message.equals("/nextchirp") || message.equals("/nexttick") || message.equals("/nextcrop")) {
 					communicator.sendNormalServerMessage(getNextChirpTime());
@@ -73,32 +85,32 @@ public class persistcroptick implements WurmServerMod, Configurable, Initable, P
 	public void onServerStarted() {
 		try {
 			Connection dbconn = ModSupportDb.getModSupportDb();
-			String sql = "";
 
 			// check if the ModSupportDb table exists
 			// if not, create the table and update it with the server's last crop poll time
 			if (!ModSupportDb.hasTable(dbconn, "PersistCropTick")) {
 				// table create
-				sql = "CREATE TABLE PersistCropTick (lastPolledTiles LONG NOT NULL DEFAULT 0)";
-				PreparedStatement ps = dbconn.prepareStatement(sql);
-				ps.execute();
-				ps.close();
+				try (PreparedStatement ps = dbconn.prepareStatement("CREATE TABLE PersistCropTick (lastPolledTiles LONG NOT NULL DEFAULT 0)")) {
+					ps.execute();
+				}
+				catch (SQLException e) {
+					throw new RuntimeException(e);
+				}
 
 				// get server last poll time
-				ClassPool classPool = HookManager.getInstance().getClassPool();
-				CtClass ctCropTilePoller = classPool.getCtClass("com.wurmonline.server.zones.CropTilePoller");
-				long lastPolled = ReflectionUtil.getPrivateField(ctCropTilePoller, ReflectionUtil.getField(CropTilePoller.class, "lastPolledTiles"));
+				long lastPolled = ReflectionUtil.getPrivateField(null, ReflectionUtil.getField(CropTilePoller.class, "lastPolledTiles"));
 				
 				if(lastPolled < 0) {
 					lastPolled = Server.getStartTime();
 				}
 
 				// update ModSupportDb
-				sql = "insert into PersistCropTick (lastPolledTiles) values (" + lastPolled + ")";
-				PreparedStatement ps2 = dbconn.prepareStatement(sql);
-				ps2.executeUpdate();
-				ps2.close();
-				dbconn.close();
+				try (PreparedStatement ps2 = dbconn.prepareStatement("insert into PersistCropTick (lastPolledTiles) values (" + lastPolled + ")")) {
+					ps2.executeUpdate();
+				}
+				catch (SQLException e) {
+					throw new RuntimeException(e);
+				}
 
 				// set static value to stay in sync
 				dbLastPolledTiles = lastPolled;
@@ -109,16 +121,14 @@ public class persistcroptick implements WurmServerMod, Configurable, Initable, P
 				dbLastPolledTiles = readDBLastPollTime();
 
 				// update the server crop tile poller to use it
-				ClassPool classPool = HookManager.getInstance().getClassPool();
-				CtClass ctCropTilePoller = classPool.getCtClass("com.wurmonline.server.zones.CropTilePoller");
-				ReflectionUtil.setPrivateField(ctCropTilePoller, ReflectionUtil.getField(CropTilePoller.class, "lastPolledTiles"), dbLastPolledTiles);
+				ReflectionUtil.setPrivateField(null, ReflectionUtil.getField(CropTilePoller.class, "lastPolledTiles"), dbLastPolledTiles);
 			}
 			initialized = true;
+			dbconn.close();
 		} 
 		catch (Exception e) {
 			throw new RuntimeException(e);
 		}
-
 	}
 
 	@Override
@@ -138,24 +148,20 @@ public class persistcroptick implements WurmServerMod, Configurable, Initable, P
 								return rtnVal;
 
 							// get the current value for the last polled time
-							ClassPool classPool = HookManager.getInstance().getClassPool();
-							CtClass ctCropTilePoller = classPool.getCtClass("com.wurmonline.server.zones.CropTilePoller");
-							long lastPolled = ReflectionUtil.getPrivateField(ctCropTilePoller, ReflectionUtil.getField(CropTilePoller.class, "lastPolledTiles"));
+							long lastPolled = ReflectionUtil.getPrivateField(null, ReflectionUtil.getField(CropTilePoller.class, "lastPolledTiles"));
 
 							// if the values are different then update the ModSupportDb to stay in sync
 							if (dbLastPolledTiles != lastPolled) {
-								Connection dbcon = null;
-								PreparedStatement ps = null;
-								try {
-									dbcon = ModSupportDb.getModSupportDb();
-									ps = dbcon.prepareStatement("update PersistCropTick set lastPolledTiles = " + lastPolled);
-									ps.executeUpdate();
-									ps.close();
-									dbcon.close();
-
-									// update the static value also
-									dbLastPolledTiles = lastPolled;
-								} catch (SQLException e) {
+								dbLastPolledTiles = lastPolled;
+								try (Connection dbcon = ModSupportDb.getModSupportDb()) {
+									try (PreparedStatement ps = dbcon.prepareStatement("update PersistCropTick set lastPolledTiles = " + lastPolled)) {
+										ps.executeUpdate();
+									}
+									catch (SQLException e) {
+										throw new RuntimeException(e);
+									}
+								}
+								catch (SQLException e) {
 									throw new RuntimeException(e);
 								}
 							}
@@ -166,24 +172,22 @@ public class persistcroptick implements WurmServerMod, Configurable, Initable, P
 			});
 		} 
 		catch (Exception e) {
-			throw new HookException(e);
+			throw new RuntimeException(e);
 		}	
 	}
 
 	private static long readDBLastPollTime() {
 		long lastPolledTiles = (long) 0;
-		Connection dbcon = null;
-		PreparedStatement ps = null;
-		ResultSet rs = null;
-		try {
-			dbcon = ModSupportDb.getModSupportDb();
-			ps = dbcon.prepareStatement("SELECT lastPolledTiles FROM PersistCropTick limit 1");
-			rs = ps.executeQuery();
-			lastPolledTiles = rs.getLong("lastPolledTiles");
-			rs.close();
-			ps.close();
-			dbcon.close();
-		} catch (SQLException e) {
+		try (Connection dbcon = ModSupportDb.getModSupportDb()) {
+			try (PreparedStatement ps = dbcon.prepareStatement("SELECT lastPolledTiles FROM PersistCropTick limit 1")) {
+				ResultSet rs = ps.executeQuery();
+				lastPolledTiles = rs.getLong("lastPolledTiles");
+			}
+			catch (SQLException e) {
+				throw new RuntimeException(e);
+			}
+		} 
+		catch (SQLException e) {
 			throw new RuntimeException(e);
 		}
 
